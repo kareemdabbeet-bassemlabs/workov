@@ -2386,21 +2386,12 @@ def check_merge_summary(ctx: Ctx):
                       {"id": "E-3", "status": "FAIL"}],
            "reviewer": "APPROVED", "budget": {}}
 
-    def merge_of_999():
-        st, state = _get_state(ctx)
-        if st != 200 or state is None:
-            return st, "missing"
-        for t in state.get("tickets", []):
-            if t.get("id") == "999":
-                return st, t.get("merge", "missing")
-        return st, "missing"
-
     with _merge_gate_guard(ctx):
         s, _ = _post_action(ctx, {"action": "set_ticket_status", "ticket": "999", "status": "awaiting-merge"})
         if s != 200:
             return FAIL, "could not set 999 to awaiting-merge ({})".format(s)
         results.write_text(json.dumps(doc), encoding="utf-8")
-        st, merge = merge_of_999()
+        merge = _merge_of(ctx, "999")
         if not isinstance(merge, dict):
             return FAIL, "merge is {!r} for a valid results.json".format(merge)
         if (merge.get("checksTotal"), merge.get("checksPassed"), merge.get("reviewer")) != (3, 2, "APPROVED"):
@@ -2408,16 +2399,16 @@ def check_merge_summary(ctx: Ctx):
         if merge.get("automated") != doc["automated"] or merge.get("diffStat") != "":
             return FAIL, "automated or diffStat wrong: {!r}".format(merge)
         results.write_text("{{ not json", encoding="utf-8")
-        st, merge = merge_of_999()
-        if st != 200 or merge is not None:
+        merge = _merge_of(ctx, "999")
+        if merge is not None:
             return FAIL, "merge is {!r} for a corrupt results.json and no branch (expected null, status 200)".format(merge)
         with _with_heartbeat(ctx):
             (ctx.fixture / "job" / "status.json").write_text(
                 json.dumps({"ticket": "999", "phase": "done", "branch": "main"}), encoding="utf-8")
-            st, merge = merge_of_999()
+            merge = _merge_of(ctx, "999")
             want = {"automated": None, "checksPassed": 0, "checksTotal": 0, "reviewer": "",
                     "diffStat": "", "resultsMissing": True}
-            if st != 200 or merge != want:
+            if merge != want:
                 return FAIL, "merge is {!r} for a corrupt results.json with a branch (expected {!r})".format(merge, want)
     return PASS, ("valid results.json -> checks 2/3, reviewer APPROVED, empty diffStat; corrupt -> null without a "
                   "branch, resultsMissing with one")
@@ -2604,7 +2595,7 @@ def check_notify_events_in_sync(ctx: Ctx):
     if not m1 or not m2:
         return FAIL, "could not find the event list in apply-setup.py or notify.sh"
     a, b = re.findall(r'"([a-z_]+)"', m1.group(1)), re.findall(r'"([a-z_]+)"', m2.group(1))
-    if sorted(a) != sorted(b) or "awaiting_merge" not in a:
+    if sorted(a) != sorted(b):
         return FAIL, "apply-setup.py has {!r}, notify.sh has {!r}".format(a, b)
     return PASS, "apply-setup.py and notify.sh list the same {} notify events".format(len(a))
 

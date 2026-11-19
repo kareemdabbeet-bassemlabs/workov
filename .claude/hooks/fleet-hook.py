@@ -10,7 +10,6 @@ to stdout, so it can never block or alter a session. Failures are logged to
 import json
 import os
 import sys
-import tempfile
 import time
 
 MAX_SUBAGENTS = 20
@@ -36,9 +35,9 @@ def log(main, msg):
 
 
 def write_atomic(path, data):
-    d = os.path.dirname(path)
-    fd, tmp = tempfile.mkstemp(dir=d, prefix=".hook-status.", suffix=".tmp")
+    tmp = os.path.join(os.path.dirname(path), ".hook-status.%d.tmp" % os.getpid())
     try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
             f.write("\n")
@@ -127,10 +126,6 @@ def main():
             return 0
         if not isinstance(ev, dict):
             return 0
-        root = find_worktree(ev.get("cwd") or os.getcwd())
-        if root is None:
-            return 0
-        marker_path = os.path.join(root, "job", "ticket.json")
         event = ev.get("hook_event_name")
         if event not in EVENTS:
             return 0
@@ -138,7 +133,10 @@ def main():
             return 0  # internal agent
         if event == "Notification" and ev.get("notification_type", None) not in ATTENTION_TYPES | {None}:
             return 0
-        with open(marker_path, encoding="utf-8") as f:
+        root = find_worktree(ev.get("cwd") or os.getcwd())
+        if root is None:
+            return 0
+        with open(os.path.join(root, "job", "ticket.json"), encoding="utf-8") as f:
             marker = json.load(f)
         if not isinstance(marker, dict):
             return 0

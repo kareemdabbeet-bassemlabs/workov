@@ -231,27 +231,22 @@ def _ticket_from_dir(path) -> str:
 def _marker_ticket(cwd, cache: dict) -> str:
     """The `ticket` of the first job/ticket.json found in `cwd` or its parents,
     stopping after the first directory that holds a .git entry. "" when there is
-    none or the marker is unreadable. `cache` (dir -> ticket) lives for one pass."""
+    none or the marker is unreadable. `cache` (cwd -> ticket) lives for one pass."""
     if not cwd:
         return ""
-    visited = []
+    key = str(cwd)
+    if key in cache:
+        return cache[key]
     found = ""
-    current = Path(str(cwd))
-    for _ in range(64):
-        key = str(current)
-        if key in cache:
-            found = cache[key]
-            break
-        visited.append(key)
-        doc = _read_json(current / "job" / "ticket.json")
+    start = Path(key)
+    for d in (start, *start.parents):
+        doc = _read_json(d / "job" / "ticket.json")
         if isinstance(doc, dict) and isinstance(doc.get("ticket"), str) and doc["ticket"].strip():
             found = doc["ticket"].strip()
             break
-        if (current / ".git").exists() or current.parent == current:
+        if (d / ".git").exists():
             break
-        current = current.parent
-    for key in visited:
-        cache[key] = found
+    cache[key] = found
     return found
 
 

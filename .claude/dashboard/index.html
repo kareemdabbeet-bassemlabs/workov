@@ -2338,9 +2338,9 @@ table.stackable { }
     // Attach the sub-badge directly after `anchorSel` inside `card`.
     function attachPipelineBadge(card, ticketId, status, anchorSel) {
       const num = pipelineNum(ticketId);
-      if (String(status || '').toLowerCase() === 'awaiting-merge') {
-        const ms = mergeStateOf(ticketId);
-        const anchorEl = ms && card.querySelector(anchorSel);
+      const ms = mergeStateOf(ticketId);
+      if (ms) {
+        const anchorEl = card.querySelector(anchorSel);
         if (anchorEl) {
           const el = document.createElement('span');
           el.className = 'pipeline-badge pipeline-merging';
@@ -2392,11 +2392,11 @@ table.stackable { }
       const m = (stateData && stateData.pendingIntents) || {};
       return m[ticketId] || '';
     }
-    // For an awaiting-merge ticket: 'approved' (intent queued), 'merging' (router ledger), or ''.
+    // The server's mergeState of an awaiting-merge ticket: 'merging' (router ledger), 'approved' (intent queued), or ''.
+    // Any other ticket has no mergeState, so this is '' for it.
     function mergeStateOf(ticketId) {
-      if (pendingIntent(ticketId) === 'approve_merge') return 'approved';
-      const pe = stateData && stateData.pipeline && stateData.pipeline[pipelineNum(ticketId)];
-      return pe && pe.phase === 'merging' ? 'merging' : '';
+      const t = ticketById(ticketId);
+      return (t && t.mergeState) || '';
     }
     function pendingWord(intent) {
       return { pause_ticket: 'pause', resume_ticket: 'resume', stop_worker: 'stop', approve_merge: 'approve merge' }[intent] || '';
@@ -2599,7 +2599,7 @@ table.stackable { }
     const NEED_STATUS = ['awaiting-merge', 'blocked', 'failed', 'budget-exceeded'];
     // A ticket needs the owner unless it is an awaiting-merge ticket already approved or merging (same rule as the Needs you strip).
     function needsOwner(status, id) {
-      return NEED_STATUS.includes(status) && !(status === 'awaiting-merge' && mergeStateOf(id));
+      return NEED_STATUS.includes(status) && !mergeStateOf(id);
     }
     // The card's own wording and symbol per status (the lamp comes from STATUS_LAMP).
     const CARD_STATUS_WORD = {
@@ -3202,9 +3202,7 @@ table.stackable { }
     // Opens the first draft ticket in board order, like clicking its card; no draft -> the Plan lane.
     let planLaneOrder = []; // ticket ids in the order the Plan lane shows them, set by renderLanes
     function reviewFirstDraft() {
-      const byId = {};
-      ((stateData && stateData.tickets) || []).forEach(t => { byId[t.id] = t; });
-      const id = planLaneOrder.find(x => byId[x] && String(byId[x].status || '').toLowerCase() === 'draft');
+      const id = planLaneOrder.find(x => String((ticketById(x) || {}).status || '').toLowerCase() === 'draft');
       if (id) openTicketDrawer(id); else jumpToStage('plan');
     }
 
@@ -3331,8 +3329,7 @@ table.stackable { }
           r.link ? h('a', { class: 'worker-link', href: r.link, target: '_blank', rel: 'noopener noreferrer', text: 'Open in Claude' }) : null));
       }
       if (r.hook) {
-        const hookAge = (typeof r.hookAgeSec === 'number') ? shortAge(r.hookAgeSec) : '';
-        kids.push(h('div', { class: 'worker-note worker-last', text: 'Last: ' + (r.hook.lastTool || 'activity') + (hookAge ? ' \u00b7 ' + hookAge : '') }));
+        kids.push(h('div', { class: 'worker-note worker-last', 'data-hook-age': r.key, text: hookLastText(r) }));
         if (r.hook.state === 'needs-attention' && r.cls === 'active' && !r.isDead) {
           kids.push(h('div', { class: 'worker-note worker-attn', text: 'Needs attention: ' + (r.hook.attention || '') }));
         }
@@ -3344,6 +3341,11 @@ table.stackable { }
       return card;
     }
 
+    function hookLastText(r) {
+      const hookAge = (typeof r.hookAgeSec === 'number') ? shortAge(r.hookAgeSec) : '';
+      return 'Last: ' + (r.hook.lastTool || 'activity') + (hookAge ? ' \u00b7 ' + hookAge : '');
+    }
+
     function ageText(r) {
       if (r.ageSec == null) return '';
       const age = 'Updated: ' + (r.ageSec > 60 ? `${Math.floor(r.ageSec / 60)}m ${r.ageSec % 60}s ago` : `${r.ageSec}s ago`);
@@ -3353,7 +3355,9 @@ table.stackable { }
     function renderAgents(rows) {
       const parts = { active: [], completed: [], failed: [] };
       rows.forEach(r => parts[r.cls].push(r));
-      const sigOf = list => JSON.stringify(list.map(r => Object.assign({}, r, { ageSec: null })));
+      // The ages and the hook's own timestamps change on every poll; the ages tick in place below and never rebuild a card.
+      const sigOf = list => JSON.stringify(list.map(r => Object.assign({}, r, { ageSec: null, hookAgeSec: null,
+        hook: r.hook && Object.assign({}, r.hook, { updatedAt: null, lastActivityAt: null }) })));
       const matrix = $('#matrix-grid'), completedGrid = $('#completed-grid'), failedGrid = $('#failed-grid');
       const pipeSig = JSON.stringify(stateData.pipeline || {});
       if (changed('agents:active', sigOf(parts.active) + pipeSig)) {
@@ -3377,8 +3381,9 @@ table.stackable { }
       }
       // Ages tick in place; no node is replaced.
       rows.forEach(r => {
-        const sel = '.age[data-age="' + String(r.key).replace(/"/g, '\\"') + '"]';
-        $$(sel).forEach(el => {
+        const key = String(r.key).replace(/"/g, '\\"');
+        if (r.hook) $$('.worker-last[data-hook-age="' + key + '"]').forEach(el => setText(el, hookLastText(r)));
+        $$('.age[data-age="' + key + '"]').forEach(el => {
           const base = el.getAttribute('data-base') != null ? el.getAttribute('data-base') : el.textContent;
           if (el.getAttribute('data-base') == null) el.setAttribute('data-base', base);
           const a = ageText(r);
@@ -5213,7 +5218,7 @@ table.stackable { }
       const st = String((t && t.status) || '').toLowerCase();
       const prio = (t && (t.prio === 'P0' || t.prio === 'P2')) ? t.prio : 'P1';
       const decision = needsDecision(ticketId);
-      const ms = st === 'awaiting-merge' ? mergeStateOf(ticketId) : '';
+      const ms = mergeStateOf(ticketId);
       const sig = [ticketId, authed, st, prio, decision, st === 'awaiting-merge' ? JSON.stringify((t && t.merge) || null) : '', ms].join('|');
       if (box.dataset.sig === sig) return;
       box.dataset.sig = sig;
@@ -5306,7 +5311,7 @@ table.stackable { }
     }
 
     async function postControlAction(ticketId, action) {
-      const labels = { pause_ticket: 'pause', resume_ticket: 'resume', stop_worker: 'stop', rerun_checker: 're-run checker', approve_merge: 'approve merge' };
+      const labels = { pause_ticket: 'pause', resume_ticket: 'resume', stop_worker: 'stop', rerun_checker: 're-run checker' };
       try {
         const res = await fetch('/api/action', { method: 'POST', headers: getAuthHeaders(), body: JSON.stringify({ action: action, ticket: ticketId }) });
         const data = await res.json().catch(() => ({}));
