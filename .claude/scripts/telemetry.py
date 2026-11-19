@@ -228,6 +228,44 @@ def _ticket_from_dir(path) -> str:
     return m.group(1) if m else ""
 
 
+def _marker_ticket(cwd, cache: dict) -> str:
+    """The `ticket` of the first job/ticket.json found in `cwd` or its parents,
+    stopping after the first directory that holds a .git entry. "" when there is
+    none or the marker is unreadable. `cache` (dir -> ticket) lives for one pass."""
+    if not cwd:
+        return ""
+    visited = []
+    found = ""
+    current = Path(str(cwd))
+    for _ in range(64):
+        key = str(current)
+        if key in cache:
+            found = cache[key]
+            break
+        visited.append(key)
+        doc = _read_json(current / "job" / "ticket.json")
+        if isinstance(doc, dict) and isinstance(doc.get("ticket"), str) and doc["ticket"].strip():
+            found = doc["ticket"].strip()
+            break
+        if (current / ".git").exists() or current.parent == current:
+            break
+        current = current.parent
+    for key in visited:
+        cache[key] = found
+    return found
+
+
+def _apply_ticket_markers(records):
+    """Attribute each record whose cwd lies in a worktree with job/ticket.json to
+    that marker's ticket, ahead of branch and directory-name parsing."""
+    cache = {}
+    out = []
+    for rec in records:
+        ticket = _marker_ticket(rec.get("cwd"), cache)
+        out.append(dict(rec, ticket=ticket) if ticket and ticket != rec.get("ticket") else rec)
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # per-file parse cache
 # --------------------------------------------------------------------------- #
@@ -792,7 +830,7 @@ def get_telemetry(window="all", run_id=None, repo_root=None, *, home=None,
     price_cache = {}
     tot_in = tot_out = tot_cache = 0
 
-    for rec in c_recs + o_recs + x_recs:
+    for rec in _apply_ticket_markers(c_recs + o_recs + x_recs):
         if rec["k"]:
             if rec["k"] in seen:
                 continue
