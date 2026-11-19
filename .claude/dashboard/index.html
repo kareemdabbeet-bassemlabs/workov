@@ -2732,6 +2732,7 @@ table.stackable { }
         team: String(ticket.mode || '').toLowerCase() === 'team',
         deps: Array.isArray(ticket.deps) ? ticket.deps.slice() : [],
         paused: serverPaused(ticket.id), pending: pendingWord(pendingIntent(ticket.id)),
+        mergeState: mergeStateOf(ticket.id),
         pr: findPrUrl(ticket.id),
         pipe: e ? [e.phase, e.label, e.updatedAt || ''] : null,
         flag: a ? (a.isDead ? 'dead' : (a.isStalled ? 'stalled ' + shortAge(a.ageSec || 0) : '')) : '',
@@ -3330,6 +3331,9 @@ table.stackable { }
       }
       if (r.hook) {
         kids.push(h('div', { class: 'worker-note worker-last', 'data-hook-age': r.key, text: hookLastText(r) }));
+        const done = (Array.isArray(r.hook.subagentsDone) ? r.hook.subagentsDone : [])
+          .map(x => ({ tester: 'Tester done', reviewer: 'Reviewer done' })[x]).filter(Boolean);
+        if (done.length) kids.push(h('div', { class: 'worker-note worker-subagents', text: done.join(' \u00b7 ') }));
         if (r.hook.state === 'needs-attention' && r.cls === 'active' && !r.isDead) {
           kids.push(h('div', { class: 'worker-note worker-attn', text: 'Needs attention: ' + (r.hook.attention || '') }));
         }

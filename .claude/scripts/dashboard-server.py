@@ -1739,6 +1739,32 @@ def _read_text_or_empty(path) -> str:
         return ""
 
 
+# Only these hook-status.json fields leave the server (never transcriptPath or sessionId).
+HOOK_PUBLIC_FIELDS = ("kind", "lastTool", "state", "attention", "updatedAt", "lastActivityAt", "toolRunning")
+HOOK_DONE_SUBAGENTS = ("tester", "reviewer")
+# A worker whose hook says a tool is running (PreToolUse seen, no PostToolUse
+# yet) is stalled only after this many stall thresholds without hook activity:
+# one long tool call is work, not a stall.
+HOOK_TOOL_RUNNING_STALL_FACTOR = 4
+
+
+def hook_public_view(doc):
+    """The part of a hook-status.json object that /api/state serves, or None.
+    String fields only, plus `subagentsDone`: which of tester and reviewer have
+    a SubagentStop entry, in that order."""
+    if not isinstance(doc, dict):
+        return None
+    out = {k: (doc.get(k) if isinstance(doc.get(k), str) else None) for k in HOOK_PUBLIC_FIELDS}
+    subagents = doc.get("subagents")
+    seen = {
+        str(s.get("type", "")).strip().lower()
+        for s in (subagents if isinstance(subagents, list) else [])
+        if isinstance(s, dict)
+    }
+    out["subagentsDone"] = [t for t in HOOK_DONE_SUBAGENTS if t in seen]
+    return out
+
+
 def hook_age_seconds(hook, now: float):
     """Seconds since hook.lastActivityAt (falling back to hook.updatedAt), or None."""
     if not isinstance(hook, dict):
@@ -1837,7 +1863,9 @@ def read_results_doc(ticket, branch: str, wt_path: str, sig=None):
 
 def find_merge_sources(tid: str, workers, worktrees):
     """(branch, worktree path) for an awaiting-merge ticket. The worker's
-    heartbeat wins over the worktree list."""
+    heartbeat wins over the worktree list. Without a heartbeat branch, only a
+    fleet worktree (`isFleet`) whose branch carries the ticket number is taken:
+    any other git worktree is never a merge source."""
     branch, wt_path = "", ""
     for w in workers:
         if worker_belongs_to_ticket(w, tid) and w.get("branch"):
@@ -1852,7 +1880,7 @@ def find_merge_sources(tid: str, workers, worktrees):
             if wt["branch"] == branch:
                 wt_path = wt_path or str(wt.get("path") or "")
                 break
-        elif boundary.search(wt["branch"]):
+        elif wt.get("isFleet") is True and boundary.search(wt["branch"]):
             branch, wt_path = wt["branch"], str(wt.get("path") or "")
             break
     return branch, wt_path
@@ -1982,7 +2010,7 @@ def get_worker_statuses():
                     )
             data["heartbeatAgeSec"] = age
             data["isActive"] = is_active_phase(data.get("phase"))
-            data["hook"] = _json_object(_read_text_or_empty(fpath.parent / "hook-status.json"))
+            data["hook"] = hook_public_view(_json_object(_read_text_or_empty(fpath.parent / "hook-status.json")))
             data["hookAgeSec"] = hook_age_seconds(data["hook"], now)
             link = ledger_links.get(_ticket_num(data.get("ticket")))
             if link:
@@ -2005,7 +2033,8 @@ def get_worker_statuses():
                     and data["hookAgeSec"] is not None and data["isActive"]):
                 # App mode: the hook's own activity clock decides for a worker
                 # the hook reports as active; the heartbeat age is not used.
-                data["isStalled"] = data["hookAgeSec"] > _get_stall_threshold_seconds()
+                factor = HOOK_TOOL_RUNNING_STALL_FACTOR if data["hook"].get("toolRunning") else 1
+                data["isStalled"] = data["hookAgeSec"] > factor * _get_stall_threshold_seconds()
             else:
                 data["isStalled"] = (age > 900) and data["isActive"]
             statuses.append(data)
@@ -3077,12 +3106,13 @@ class FleetControlHandler(http.server.BaseHTTPRequestHandler):
             # intents are shown separately.
             paused_ids = get_paused_tickets()
             pending_ids = get_pending_intents()
+            pipeline_state = get_pipeline_state()
             for t in tickets:
                 t["paused"] = t["id"] in paused_ids
                 if t["id"] in pending_ids:
                     t["pendingIntent"] = pending_ids[t["id"]]
                 if t["status"] == "awaiting-merge":
-                    t["mergeState"] = merge_gate_state(t["id"], pending=pending_ids)
+                    t["mergeState"] = merge_gate_state(t["id"], pipeline_state, pending_ids)
 
             # Live burn (ticket 014, FR-6): every worker gains a `budget`
             # block merged from the ledger, its heartbeat and telemetry.
@@ -3128,7 +3158,7 @@ class FleetControlHandler(http.server.BaseHTTPRequestHandler):
                 "worktrees": worktrees,
                 "ports": ports_to_check,
                 "swarm": get_swarm_state(),
-                "pipeline": get_pipeline_state(),
+                "pipeline": pipeline_state,
             }
             state = scrub_live_token(state, get_auth_token())
             self._send_json(200, state)
@@ -3381,6 +3411,11 @@ class FleetControlHandler(http.server.BaseHTTPRequestHandler):
                             )
                         },
                     )
+                    return
+                if new_status == "awaiting-merge":
+                    # The merge gate: only the router puts a ticket there, after it verified the work.
+                    self._audit_action(req, "error:400")
+                    self._send_json(400, {"error": "Cannot set awaiting-merge by hand: only the router sets it, when a ticket passed verification in landing mode approve."})
                     return
                 # Malformed id (BOARD, "01", traversal, Unicode digits) -> 400.
                 if not is_valid_ticket_id(ticket_id):

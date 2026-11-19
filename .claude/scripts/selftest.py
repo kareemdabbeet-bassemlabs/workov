@@ -1776,7 +1776,7 @@ class RuntimeScratch:
         shutil.rmtree(self.work, ignore_errors=True)
 
 
-RUNTIME_HOOK_EVENTS = ("SessionStart", "PostToolUse", "SubagentStop", "Stop", "Notification", "SessionEnd")
+RUNTIME_HOOK_EVENTS = ("SessionStart", "PreToolUse", "PostToolUse", "SubagentStop", "Stop", "Notification", "SessionEnd")
 RUNTIME_USER_SETTINGS = {
     "permissions": {"allow": ["WebSearch"]},
     "env": {"FOO": "bar", "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "5"},
@@ -1823,6 +1823,27 @@ def check_runtime_app_sets_defaults(ctx: Ctx):
         sc.cleanup()
 
 
+def check_runtime_app_keeps_pr_landing(ctx: Ctx):
+    sc = RuntimeScratch(ctx)
+    try:
+        if sc.apply("--landing", "pr").returncode != 0 or sc.config().get("landing") != "pr":
+            return FAIL, "could not set landing pr in the scratch config"
+        res = sc.apply("--runtime", "app")
+        cfg = sc.config()
+        if res.returncode != 0 or cfg.get("runtime") != "app" or cfg.get("landing") != "pr":
+            return FAIL, "--runtime app on a pr config: exit {}, runtime {!r}, landing {!r}".format(
+                res.returncode, cfg.get("runtime"), cfg.get("landing"))
+        said = [ln for ln in res.stdout.splitlines() if 'Landing stays "pr"' in ln and "--landing approve" in ln]
+        if len(said) != 1:
+            return FAIL, "expected one line saying landing stays pr and how to switch, got {!r}".format(said)
+        res = sc.apply("--runtime", "app", "--landing", "approve")
+        if res.returncode != 0 or sc.config().get("landing") != "approve":
+            return FAIL, "--landing approve did not switch: {!r}".format(sc.config().get("landing"))
+        return PASS, "--runtime app kept landing pr and said how to switch; --landing approve switched it"
+    finally:
+        sc.cleanup()
+
+
 def check_settings_merge_keeps_existing(ctx: Ctx):
     sc = RuntimeScratch(ctx)
     try:
@@ -1845,7 +1866,7 @@ def check_settings_merge_keeps_existing(ctx: Ctx):
             cmds = fleet_hook_commands(doc, event)
             if cmds != ['python3 -I "${CLAUDE_PROJECT_DIR}/.claude/hooks/fleet-hook.py" || true']:
                 return FAIL, "{} has fleet hook commands {!r}".format(event, cmds)
-        return PASS, "existing permissions, env and hooks kept; six fleet hook entries added"
+        return PASS, "existing permissions, env and hooks kept; seven fleet hook entries added"
     finally:
         sc.cleanup()
 
@@ -1924,7 +1945,7 @@ def check_runtime_terminal_removes_hooks(ctx: Ctx):
             return FAIL, "the user's hooks are not exactly as before: {!r}".format(doc.get("hooks"))
         if sc.config().get("runtime") != "terminal":
             return FAIL, "config runtime is not terminal"
-        return PASS, "--runtime terminal removed the six fleet entries and kept the user's echo hi hook"
+        return PASS, "--runtime terminal removed the seven fleet entries and kept the user's echo hi hook"
     finally:
         sc.cleanup()
 
@@ -2213,19 +2234,40 @@ def _merge_gate_guard(ctx: Ctx):
                           ctx.fixture / "job" / "control" / "999.json")
 
 
+def _set_awaiting_merge(ctx: Ctx, tid="999"):
+    """Put a ticket at the merge gate the way the router does: in the board row
+    (the dashboard refuses awaiting-merge as a manual status)."""
+    board = ctx.fixture / "specs" / "tickets" / "BOARD.md"
+    text, n = re.subn(r"(?m)^(\|\s*{}\s*\|[^|]*\|)[^|]*\|".format(re.escape(tid)),
+                      lambda m: m.group(1) + " awaiting-merge |", board.read_text(encoding="utf-8"))
+    if n != 1:
+        raise RuntimeError("board row for {} not found".format(tid))
+    board.write_text(text, encoding="utf-8")
+
+
+def _status_of(ctx: Ctx, tid):
+    st, state = _get_state(ctx)
+    got = {t.get("id"): t.get("status") for t in (state or {}).get("tickets", [])}
+    return got.get(tid) if st == 200 else "state {}".format(st)
+
+
 def check_awaiting_merge_status_valid(ctx: Ctx):
+    board = ctx.fixture / "specs" / "tickets" / "BOARD.md"
     with _merge_gate_guard(ctx):
+        before = board.read_bytes()
         s, b = _post_action(ctx, {"action": "set_ticket_status", "ticket": "999", "status": "awaiting-merge"})
-        if s != 200:
-            return FAIL, "set_ticket_status awaiting-merge returned {}: {!r}".format(s, b[:200])
-        board = (ctx.fixture / "specs" / "tickets" / "BOARD.md").read_text(encoding="utf-8")
-        if not re.search(r"^\|\s*999\s*\|.*\|\s*awaiting-merge\s*\|", board, re.M):
-            return FAIL, "the board row for 999 does not show awaiting-merge"
-        st, state = _get_state(ctx)
-        got = {t.get("id"): t.get("status") for t in (state or {}).get("tickets", [])}
-        if st != 200 or got.get("999") != "awaiting-merge":
-            return FAIL, "/api/state shows 999 as {!r}".format(got.get("999"))
-    return PASS, "awaiting-merge accepted (200), written to the board row and returned by /api/state"
+        if s != 400 or b"router" not in b:
+            return FAIL, "set_ticket_status awaiting-merge returned {}: {!r} (expected 400)".format(s, b[:200])
+        if board.read_bytes() != before:
+            return FAIL, "the refused set_ticket_status changed the board"
+        _set_awaiting_merge(ctx)
+        if _status_of(ctx, "999") != "awaiting-merge":
+            return FAIL, "/api/state shows 999 as {!r} for a board row in awaiting-merge".format(_status_of(ctx, "999"))
+        s, b = _post_action(ctx, {"action": "set_ticket_status", "ticket": "999", "status": "ready"})
+        if s != 200 or _status_of(ctx, "999") != "ready":
+            return FAIL, "leaving awaiting-merge by hand returned {}: {!r}".format(s, b[:200])
+    return PASS, ("awaiting-merge refused as a manual status (400, board untouched); a board row in "
+                  "awaiting-merge is returned by /api/state and can be set to ready by hand")
 
 
 def check_approve_merge_requires_awaiting(ctx: Ctx):
@@ -2253,9 +2295,7 @@ def check_approve_merge_queues_intent(ctx: Ctx):
         return len(audit.read_text(encoding="utf-8").splitlines()) if audit.is_file() else 0
 
     with _merge_gate_guard(ctx):
-        s, _ = _post_action(ctx, {"action": "set_ticket_status", "ticket": "999", "status": "awaiting-merge"})
-        if s != 200:
-            return FAIL, "could not set 999 to awaiting-merge ({})".format(s)
+        _set_awaiting_merge(ctx)
         before = audit_lines()
         s, b = _post_action(ctx, {"action": "approve_merge", "ticket": "999"})
         if s != 200:
@@ -2287,11 +2327,19 @@ def _ts_ago(seconds):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - seconds))
 
 
-def _hook_doc(state, age_sec):
+def _hook_doc(state, age_sec, tool_running=None):
     return {"version": 1, "ticket": "050", "kind": "session", "sessionId": "s1",
-            "transcriptPath": "", "startedAt": _ts_ago(age_sec + 60), "lastTool": "Edit",
-            "lastActivityAt": _ts_ago(age_sec), "subagents": [], "state": state,
-            "attention": "", "attentionType": "", "updatedAt": _ts_ago(age_sec)}
+            "transcriptPath": "/t/s1.jsonl", "startedAt": _ts_ago(age_sec + 60), "lastTool": "Edit",
+            "lastActivityAt": _ts_ago(age_sec), "toolRunning": tool_running,
+            "subagents": [{"type": "reviewer", "stoppedAt": _ts_ago(age_sec)},
+                          {"type": "Explore", "stoppedAt": _ts_ago(age_sec)},
+                          {"type": "tester", "stoppedAt": _ts_ago(age_sec)},
+                          {"type": "tester", "stoppedAt": _ts_ago(age_sec)}],
+            "state": state, "attention": "", "attentionType": "", "updatedAt": _ts_ago(age_sec)}
+
+
+HOOK_SERVED_KEYS = {"kind", "lastTool", "state", "attention", "updatedAt", "lastActivityAt", "toolRunning",
+                    "subagentsDone"}
 
 
 def _hook_worker(ctx: Ctx):
@@ -2328,7 +2376,12 @@ def check_hook_status_merged(ctx: Ctx):
         age = w.get("hookAgeSec")
         if isinstance(age, bool) or not isinstance(age, (int, float)) or not 25 <= age < 120:
             return FAIL, "hookAgeSec is {!r}".format(age)
-    return PASS, "worker entry carries hook.lastTool and a numeric hookAgeSec next to the heartbeat phase"
+        if set(hook) != HOOK_SERVED_KEYS:
+            return FAIL, "hook carries {!r} (expected only {!r})".format(sorted(hook), sorted(HOOK_SERVED_KEYS))
+        if hook.get("subagentsDone") != ["tester", "reviewer"]:
+            return FAIL, "subagentsDone is {!r}".format(hook.get("subagentsDone"))
+    return PASS, ("worker entry carries hook.lastTool and a numeric hookAgeSec next to the heartbeat phase; only the "
+                  "page's hook fields are served (no sessionId or transcriptPath), with subagentsDone tester, reviewer")
 
 
 def check_hook_stall_rule(ctx: Ctx):
@@ -2349,7 +2402,16 @@ def check_hook_stall_rule(ctx: Ctx):
         w, _ = _hook_worker(ctx)
         if w is None or w.get("isStalled") is not False:
             return FAIL, "active hook 30 s old is stalled"
-    return PASS, "active hook past the threshold -> stalled despite a fresh heartbeat; idle or recent -> not stalled"
+        hook_path.write_text(json.dumps(_hook_doc("active", 20 * 60, "Bash")), encoding="utf-8")
+        w, _ = _hook_worker(ctx)
+        if w is None or w.get("isStalled") is not False:
+            return FAIL, "a tool running for 20 min (threshold 15, limit 60) is stalled"
+        hook_path.write_text(json.dumps(_hook_doc("active", 70 * 60, "Bash")), encoding="utf-8")
+        w, _ = _hook_worker(ctx)
+        if w is None or w.get("isStalled") is not True:
+            return FAIL, "a tool running for 70 min (limit 4 x 15) is not stalled"
+    return PASS, ("active hook past the threshold -> stalled despite a fresh heartbeat; idle or recent -> not stalled; "
+                  "a running tool -> stalled only past 4 x the threshold")
 
 
 def check_hook_stall_requires_active(ctx: Ctx):
@@ -2387,9 +2449,7 @@ def check_merge_summary(ctx: Ctx):
            "reviewer": "APPROVED", "budget": {}}
 
     with _merge_gate_guard(ctx):
-        s, _ = _post_action(ctx, {"action": "set_ticket_status", "ticket": "999", "status": "awaiting-merge"})
-        if s != 200:
-            return FAIL, "could not set 999 to awaiting-merge ({})".format(s)
+        _set_awaiting_merge(ctx)
         results.write_text(json.dumps(doc), encoding="utf-8")
         merge = _merge_of(ctx, "999")
         if not isinstance(merge, dict):
@@ -2475,9 +2535,7 @@ def check_merge_summary_from_worktree(ctx: Ctx):
         (wt / "job").mkdir()
         (wt / "job" / "status.json").write_text(
             json.dumps({"ticket": "999-fixture", "phase": "done", "branch": "feat/999-fixture"}), encoding="utf-8")
-        s, _ = _post_action(ctx, {"action": "set_ticket_status", "ticket": "999", "status": "awaiting-merge"})
-        if s != 200:
-            return FAIL, "could not set 999 to awaiting-merge ({})".format(s)
+        _set_awaiting_merge(ctx)
         merge = _merge_of(ctx, "999")
         if not isinstance(merge, dict) or (merge.get("checksTotal"), merge.get("checksPassed")) != (3, 2):
             return FAIL, "merge is {!r} for a results.json that lives only in the worktree".format(merge)
@@ -2496,9 +2554,7 @@ def check_merge_summary_branch_only(ctx: Ctx):
         (ctx.fixture / "job").mkdir(exist_ok=True)
         (ctx.fixture / "job" / "status.json").write_text(
             json.dumps({"ticket": "999-fixture", "phase": "done", "branch": "feat/999-fixture"}), encoding="utf-8")
-        s, _ = _post_action(ctx, {"action": "set_ticket_status", "ticket": "999", "status": "awaiting-merge"})
-        if s != 200:
-            return FAIL, "could not set 999 to awaiting-merge ({})".format(s)
+        _set_awaiting_merge(ctx)
         merge = _merge_of(ctx, "999")
         if not isinstance(merge, dict) or (merge.get("checksTotal"), merge.get("checksPassed")) != (3, 2):
             return FAIL, "merge is {!r} with results only on the branch (git show)".format(merge)
@@ -2545,6 +2601,24 @@ def check_merge_branch_boundary(ctx: Ctx):
             for d in made:
                 shutil.rmtree(str(d), ignore_errors=True)
     return PASS, "tickets 012 and 0123 each get the diff stat of their own branch"
+
+
+def check_merge_source_fleet_only(ctx: Ctx):
+    results = ctx.fixture / "specs" / "tickets" / "999-fixture" / "results.json"
+    with _merge_gate_guard(ctx), _fixture_repo(ctx) as (git, extra):
+        if results.exists():
+            results.unlink()
+        wt = _branch_with_results(git, ctx, extra, "999", "999-fixture", "chore/999-notes", _RESULTS_3, "wt-other")
+        _set_awaiting_merge(ctx)
+        merge = _merge_of(ctx, "999")
+        if merge is not None:
+            return FAIL, "merge is {!r} from a git worktree that is not a fleet worker (expected null)".format(merge)
+        (wt / "job").mkdir()
+        (wt / "job" / "ticket.json").write_text(json.dumps({"ticket": "999"}), encoding="utf-8")
+        merge = _merge_of(ctx, "999")
+        if not isinstance(merge, dict) or merge.get("checksTotal") != 3 or not merge.get("diffStat"):
+            return FAIL, "merge is {!r} from a fleet worktree found by its branch number".format(merge)
+    return PASS, "no heartbeat: a plain git worktree named 999 is not a merge source; one with job/ticket.json is"
 
 
 def check_telemetry_ticket_marker(ctx: Ctx):
@@ -2642,9 +2716,7 @@ def check_approve_merge_refused_when_merging(ctx: Ctx):
     ledger = ctx.fixture / "job" / "router-state.json"
     audit = ctx.fixture / "job" / "audit.jsonl"
     with _merge_gate_guard(ctx), FixtureRestore(ledger, audit):
-        s, _ = _post_action(ctx, {"action": "set_ticket_status", "ticket": "999", "status": "awaiting-merge"})
-        if s != 200:
-            return FAIL, "could not set 999 to awaiting-merge ({})".format(s)
+        _set_awaiting_merge(ctx)
         ledger.parent.mkdir(exist_ok=True)
         ledger.write_text(json.dumps({"dispatched": [{"ticket": "999-fixture", "lastPhase": "merging"}]}), encoding="utf-8")
         s, b = _post_action(ctx, {"action": "approve_merge", "ticket": "999"})
@@ -2666,9 +2738,7 @@ def check_approve_merge_refused_when_merging(ctx: Ctx):
 def check_approve_merge_idempotent_when_queued(ctx: Ctx):
     intent = ctx.fixture / "job" / "control" / "999.json"
     with _merge_gate_guard(ctx):
-        s, _ = _post_action(ctx, {"action": "set_ticket_status", "ticket": "999", "status": "awaiting-merge"})
-        if s != 200:
-            return FAIL, "could not set 999 to awaiting-merge ({})".format(s)
+        _set_awaiting_merge(ctx)
         s, _ = _post_action(ctx, {"action": "approve_merge", "ticket": "999"})
         if s != 200:
             return FAIL, "first approve_merge returned {}".format(s)
@@ -2745,6 +2815,7 @@ RUN_ORDER = [
     ("merge_summary_from_worktree", check_merge_summary_from_worktree),
     ("merge_summary_branch_only", check_merge_summary_branch_only),
     ("merge_branch_boundary", check_merge_branch_boundary),
+    ("merge_source_fleet_only", check_merge_source_fleet_only),
     ("telemetry_ticket_marker", check_telemetry_ticket_marker),
     ("notify_events_in_sync", check_notify_events_in_sync),
     ("notify_awaiting_merge_event", check_notify_awaiting_merge_event),
@@ -2765,6 +2836,7 @@ RUN_ORDER = [
     ("notify_secrets_migrated", check_notify_secrets_migrated),
     ("config_gains_runtime", check_config_gains_runtime),
     ("runtime_app_sets_defaults", check_runtime_app_sets_defaults),
+    ("runtime_app_keeps_pr_landing", check_runtime_app_keeps_pr_landing),
     ("settings_merge_keeps_existing", check_settings_merge_keeps_existing),
     ("settings_hook_command_upgraded", check_settings_hook_command_upgraded),
     ("runtime_app_warns_missing_hook", check_runtime_app_warns_missing_hook),
@@ -2781,7 +2853,7 @@ RUN_ORDER = [
 CHECK_NAMES = [name for name, _ in RUN_ORDER]
 SERVER_CHECKS = {
     "awaiting_merge_status_valid", "approve_merge_requires_awaiting", "approve_merge_queues_intent", "approve_merge_requires_token", "approve_merge_refused_when_merging", "approve_merge_idempotent_when_queued", "worktrees_marked_fleet", "hook_status_merged", "hook_stall_rule", "hook_stall_requires_active", "hook_status_corrupt_ignored", "worker_link_from_ledger", "merge_summary",
-    "merge_summary_from_worktree", "merge_summary_branch_only", "merge_branch_boundary",
+    "merge_summary_from_worktree", "merge_summary_branch_only", "merge_branch_boundary", "merge_source_fleet_only",
     "auth_loopback_read_open", "state_hides_token", "api_files_hide_token",
     "auth_post_requires_token",
     "auth_lan_spoof_rejected",

@@ -209,8 +209,8 @@ App mode runs the router inside a Claude desktop app session instead of a termin
 
 - The router is the `/fleet` skill, run in an app session, not `claude --agent router`.
 - Workers are app sessions with their own worktree when the app allows it, and subagents otherwise. The dashboard tags each worker `Session` or `Subagent`, and a session worker gets an `Open in Claude` link when the app reported one.
-- Hooks (`.claude/hooks/fleet-hook.py`) report each worker's activity to the dashboard: last tool, tester and reviewer completion, and a request for attention. A worker with a hook heartbeat older than `watchdog.stallThresholdMinutes` shows as stalled.
-- Landing is `approve` by default: a verified ticket waits in `awaiting-merge` until you approve the merge.
+- Hooks (`.claude/hooks/fleet-hook.py`) report each worker's activity to the dashboard: last tool, tester and reviewer completion, and a request for attention. A worker with a hook heartbeat older than `watchdog.stallThresholdMinutes` shows as stalled; while one tool call is still running, only after four times that long.
+- Landing is `approve` by default (a project already on `pr` keeps `pr`): a verified ticket waits in `awaiting-merge` until you approve the merge.
 
 **Set up**
 
@@ -218,7 +218,7 @@ App mode runs the router inside a Claude desktop app session instead of a termin
 python3 .claude/scripts/apply-setup.py --runtime app
 ```
 
-This registers the six hook events in `.claude/settings.json` (it merges into an existing file and keeps your other entries), records `runtime: "app"` in the config, and sets `landing: "approve"` when you switch from terminal mode. `--runtime terminal` removes the hook entries again. Commit the workov files, including `.claude/settings.json` and `.claude/hooks/`, on `main` first. A worker's worktree is cut from `main` and holds only committed files, and its hooks load from its own copy of the settings.
+This registers the seven hook events in `.claude/settings.json` (it merges into an existing file and keeps your other entries), records `runtime: "app"` in the config, and, when you switch from terminal mode, sets `landing: "approve"` if landing was `direct` or not set. A project on `pr` keeps `pr`, and the command says so; pass `--landing approve` to switch. `--runtime terminal` removes the hook entries again. Commit the workov files, including `.claude/settings.json` and `.claude/hooks/`, on `main` first. A worker's worktree is cut from `main` and holds only committed files, and its hooks load from its own copy of the settings.
 
 **Run**
 
@@ -384,7 +384,7 @@ Two projects on one machine need different ports. `apply-setup.py` refuses ports
 
 - **`direct`** (default): the merger merges a verified ticket into `main`.
 - **`pr`**: the merger pushes the branch and opens a GitHub pull request, the ticket waits as `in-review`, and the router polls the pull request until a human merges it. Set it for the project with `--landing pr`, or for one ticket with a `## Landing` section (`- Mode: pr`) in its `rd.md`. It needs `gh` and an `origin` remote.
-- **`approve`**: the merge is the same as `direct`, but a verified ticket waits as `awaiting-merge` until you press **Approve merge** on the dashboard. Set it with `--landing approve` (the default after `--runtime app`), or for one ticket with `- Mode: approve` in its `## Landing` section.
+- **`approve`**: the merge is the same as `direct`, but a verified ticket waits as `awaiting-merge` until you press **Approve merge** on the dashboard. Set it with `--landing approve` (the default after `--runtime app`, unless landing was already `pr`), or for one ticket with `- Mode: approve` in its `## Landing` section.
 
 ### Notifications
 

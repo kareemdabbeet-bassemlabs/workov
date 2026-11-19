@@ -49,7 +49,7 @@ Quick reference:
 **Cause and fix, in the order to check:**
 
 1. The workov files are not committed on `main`. A worktree holds only committed files and loads hooks from its own `.claude/settings.json`. Commit `.claude/settings.json` and `.claude/hooks/` on `main`, then start the ticket again.
-2. The hooks are not registered. Run `python3 .claude/scripts/apply-setup.py --runtime app`, and check that `.claude/settings.json` lists the six fleet-hook events.
+2. The hooks are not registered. Run `python3 .claude/scripts/apply-setup.py --runtime app`, and check that `.claude/settings.json` lists the seven fleet-hook events.
 3. The marker is missing or in the wrong place. The hook looks for `job/ticket.json` by walking up from the session's folder. The worker must write it at the root of its working folder as its first step, with valid JSON. Without it the hook does nothing, by design.
 4. Check that `job/ticket.json` exists at the worktree root and parses as JSON. A corrupt marker is silent: the hook does nothing and logs nothing. For other errors, read `job/logs/fleet-hook.log` in the main checkout; the hook always exits 0.
 

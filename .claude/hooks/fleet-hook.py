@@ -12,10 +12,16 @@ import os
 import sys
 import time
 
+try:
+    import fcntl
+except ImportError:  # no flock on this platform: run without the lock
+    fcntl = None
+
 MAX_SUBAGENTS = 20
 MAX_ATTENTION = 300
 ATTENTION_TYPES = {"permission_prompt", "idle_prompt", "agent_needs_input", "elicitation_dialog"}
-EVENTS = {"SessionStart", "PostToolUse", "SubagentStop", "Stop", "Notification", "SessionEnd"}
+EVENTS = {"SessionStart", "PreToolUse", "PostToolUse", "SubagentStop", "Stop", "Notification", "SessionEnd"}
+LOCK_WAIT_SECONDS = 1.0  # longest wait for another hook process; after it the write goes ahead unlocked
 
 
 def now():
@@ -48,6 +54,30 @@ def write_atomic(path, data):
         except OSError:
             pass
         raise
+
+
+def lock_status(job_dir):
+    """An exclusive flock on job/.hook-status.lock, so overlapping hook processes
+    do not lose each other's update. Returns the open fd, or None when there is
+    no flock, the file cannot be opened, or the lock is still held after
+    LOCK_WAIT_SECONDS (a session is never blocked for longer). Closing the fd
+    releases the lock."""
+    if fcntl is None:
+        return None
+    try:
+        fd = os.open(os.path.join(job_dir, ".hook-status.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError:
+        return None
+    deadline = time.monotonic() + LOCK_WAIT_SECONDS
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd
+        except OSError:
+            if time.monotonic() >= deadline:
+                os.close(fd)
+                return None
+            time.sleep(0.02)
 
 
 def load_status(path):
@@ -91,11 +121,18 @@ def apply_event(st, ev, marker, event, ts):
         st["startedAt"] = ts
     st.setdefault("lastTool", None)
     st.setdefault("lastActivityAt", None)
+    st.setdefault("toolRunning", None)
     if not isinstance(st.get("subagents"), list):
         st["subagents"] = []
     st["attention"] = None
     st["attentionType"] = None
 
+    if event == "PreToolUse":
+        # A tool call started: activity now, and the dashboard knows a tool is running.
+        st["toolRunning"] = ev.get("tool_name") or "tool"
+        st["lastActivityAt"] = ts
+    elif event != "Notification" and event != "SubagentStop":
+        st["toolRunning"] = None  # the call returned, or the turn or session ended or restarted
     if event == "PostToolUse":
         st["lastTool"] = ev.get("tool_name")
         st["lastActivityAt"] = ts
@@ -142,9 +179,14 @@ def main():
             return 0
         main_dir = marker.get("main")
         status_path = os.path.join(root, "job", "hook-status.json")
-        st = load_status(status_path)
-        apply_event(st, ev, marker, event, now())
-        write_atomic(status_path, st)
+        lock_fd = lock_status(os.path.join(root, "job"))
+        try:
+            st = load_status(status_path)
+            apply_event(st, ev, marker, event, now())
+            write_atomic(status_path, st)
+        finally:
+            if lock_fd is not None:
+                os.close(lock_fd)
     except Exception as e:
         log(main_dir, "fleet-hook error: %s: %s" % (type(e).__name__, e))
     return 0

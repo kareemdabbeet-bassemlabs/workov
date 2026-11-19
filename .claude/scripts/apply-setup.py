@@ -826,7 +826,7 @@ FLEET_HOOK_MARKER = "fleet-hook.py"
 # `|| true`: a missing script makes python3 exit 2, which Claude Code treats as a blocking error.
 FLEET_HOOK_COMMAND = 'python3 -I "${CLAUDE_PROJECT_DIR}/.claude/hooks/fleet-hook.py" || true'
 FLEET_HOOK_REL = Path(".claude") / "hooks" / "fleet-hook.py"
-FLEET_HOOK_EVENTS = ("SessionStart", "PostToolUse", "SubagentStop", "Stop", "Notification", "SessionEnd")
+FLEET_HOOK_EVENTS = ("SessionStart", "PreToolUse", "PostToolUse", "SubagentStop", "Stop", "Notification", "SessionEnd")
 
 
 def _is_fleet_handler(handler) -> bool:
@@ -965,7 +965,7 @@ def main():
     parser.add_argument(
         "--runtime",
         choices=["app", "terminal"],
-        help="Where the fleet runs: terminal (default) or app (registers the fleet hook in .claude/settings.json and defaults landing to approve when switching from terminal)",
+        help="Where the fleet runs: terminal (default) or app (registers the fleet hook in .claude/settings.json and, when switching from terminal, sets landing to approve unless it is already pr or approve)",
     )
     # Ticket 017: script-mode watchdog configuration.
     parser.add_argument(
@@ -1215,7 +1215,11 @@ def main():
     if args.landing:
         config["landing"] = args.landing
     elif args.runtime == "app" and runtime_before != "app":
-        config["landing"] = "approve"
+        # Switching to app: the merge gate is the default, but an explicit pr stays.
+        if config.get("landing") in (None, "direct"):
+            config["landing"] = "approve"
+        elif config.get("landing") == "pr":
+            print('Landing stays "pr". To approve merges in the dashboard instead, re-run with --landing approve.')
     else:
         config.setdefault("landing", "direct")
 

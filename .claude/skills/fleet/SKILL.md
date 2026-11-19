@@ -51,7 +51,7 @@ Add the usual inputs from `router.md` Step 2 (ticket folder, port, test account,
 With `landing: "approve"` (or a ticket's `## Landing` section saying `approve`):
 
 - After verification passes, set `lastPhase: "approved-awaiting-merge"`, set the board status to `awaiting-merge` and the `**Status:**` line of the ticket's `rd.md` to `awaiting-merge` (flip both, as `router.md` Step 3 says), run `bash .claude/scripts/notify.sh awaiting_merge 'Ticket NNN ready to merge' NNN || true`, and do not spawn the merger.
-- When `job/control/NNN.json` holds `action: "approve_merge"` and the board status is `awaiting-merge` AND the ledger `lastPhase` is `approved-awaiting-merge`, delete the intent, then spawn `merger` and after it `checker` as subagents.
+- When `job/control/NNN.json` holds `action: "approve_merge"` and the board status is `awaiting-merge` AND the ledger `lastPhase` is `approved-awaiting-merge`, set the ledger `lastPhase` to `"merging"` first, then delete the intent, then spawn `merger` and after it `checker` as subagents.
 - Otherwise delete the intent and report one line: `approve_merge for NNN ignored: status is <status>, phase is <lastPhase>`.
 - If the merger reports a failed merge (conflict, lint or build), follow `router.md` Step 1.5 `approve_merge`: board and `rd.md` back to `in-progress`, ledger `lastPhase: "changes-requested"`, the exact error to the worker (see "Steering a session worker"), and a fresh approval after re-verification.
 

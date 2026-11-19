@@ -160,6 +160,50 @@ class HookTest(unittest.TestCase):
         self.run_hook("PreCompact")
         self.assertEqual(self.status(), before)
 
+    def test_pre_tool_use_marks_tool_running(self):
+        self.marker()
+        self.run_hook("SessionStart")
+        self.assertIsNone(self.status()["toolRunning"])
+        self.run_hook("PreToolUse", tool_name="Bash")
+        s = self.status()
+        self.assertEqual(s["toolRunning"], "Bash")
+        self.assertEqual(s["state"], "active")
+        self.assertTrue(s["lastActivityAt"])
+        self.assertIsNone(s["lastTool"])
+        self.run_hook("SubagentStop", agent_type="tester")
+        self.assertEqual(self.status()["toolRunning"], "Bash")
+        self.run_hook("PostToolUse", tool_name="Bash")
+        s = self.status()
+        self.assertIsNone(s["toolRunning"])
+        self.assertEqual(s["lastTool"], "Bash")
+
+    def test_stop_clears_tool_running(self):
+        self.marker()
+        self.run_hook("PreToolUse", tool_name="Bash")
+        self.run_hook("Stop")
+        self.assertIsNone(self.status()["toolRunning"])
+
+    def test_concurrent_hooks_lose_no_update(self):
+        self.marker()
+        self.run_hook("SessionStart")
+        count = 12
+        procs = []
+        for i in range(count):
+            raw = json.dumps({"session_id": "s-1", "cwd": self.wt, "hook_event_name": "SubagentStop",
+                              "agent_type": "agent-%d" % i})
+            p = subprocess.Popen(["python3", "-I", HOOK], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True, cwd=self.root)
+            p.stdin.write(raw)
+            p.stdin.close()
+            procs.append(p)
+        for p in procs:
+            self.assertEqual(p.wait(timeout=30), 0)
+            p.stdout.close()
+            p.stderr.close()
+        types = sorted(e["type"] for e in self.status()["subagents"])
+        self.assertEqual(types, sorted("agent-%d" % i for i in range(count)))
+        self.assertFalse(os.path.exists(os.path.join(self.main, "job", "logs", "fleet-hook.log")))
+
     def test_atomic_write(self):
         self.marker()
         self.run_hook("SessionStart")
